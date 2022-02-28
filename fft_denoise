@@ -1,0 +1,157 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Thur Aug  26 18:25:00 2021
+
+@author: Chen Xu
+"""
+
+import tensorflow.compat.v1 as tf
+tf.disable_v2_behavior()
+# import tensorflow as tf
+from tensorflow import keras
+import numpy as np
+from scipy.misc import imresize
+from tqdm import tqdm
+import matplotlib.pyplot as plt
+from sklearn.metrics import confusion_matrix
+#from tensorflow.examples.tutorials.mnist import input_data
+mnist=tf.keras.datasets.mnist
+(x_train,_),(x_test,_)=mnist.load_data()
+x_train=x_train/255.0
+x_test=x_test/255.0
+
+# mnist = input_data.read_data_sets("MNIST_data",one_hot=True)
+# x_train = mnist.train.images
+# x_test = mnist.test.images
+
+
+size = 28
+batch_size = 128
+noise_factor = 0.5
+global_step = tf.Variable(0, trainable=False)
+LEARNING_RATE_STEP = 60000 // batch_size
+learning_rate = tf.train.exponential_decay(0.01, global_step,
+                                           LEARNING_RATE_STEP, 0.95, staircase=True)
+
+def _change(input_):
+    return imresize(input_.reshape(28, 28), (size, size), interp = "nearest")
+
+
+def change(input_):
+    return np.array(list(map(_change, input_)))
+
+# 4f system can be considered as a linear interconection
+def sf_system(u, w):
+    U = tf.fft2d(u)
+    # W=tf.fft2d(w)
+    W = tf.fft2d(tf.cast(w, dtype = tf.complex64))
+    return tf.ifft2d(U * W)
+
+def next_batch(batch_size, fake_data=False, shuffle=True):
+    self_images = x_train
+    self_epochs_completed =0
+    self_index_in_epoch = 0
+    self_num_examples=len(x_train)
+    start = self_index_in_epoch
+    if self_epochs_completed == 0 and start == 0 and shuffle:
+        perm0 = np.arange(self_num_examples)
+        np.random.shuffle(perm0)
+        self_images = x_train[perm0]
+        # Go to the next epoch
+
+
+    if start + batch_size > self_num_examples:
+        self_epochs_completed += 1
+            # Get the rest examples in this epoch
+        rest_num_examples = self_num_examples - start
+        images_rest_part = self_images[start:self_num_examples]
+
+        # Shuffle the data
+        if shuffle:
+            perm = np.arange(self_num_examples)
+            np.random.shuffle(perm)
+            self_images = x_train[perm]
+
+            # Start next epoch
+        start = 0
+        self_index_in_epoch = batch_size - rest_num_examples
+        end = self_index_in_epoch
+        images_new_part = self_images[start:end]
+
+        return np.concatenate((images_rest_part, images_new_part), axis=0)
+    else:
+        self_index_in_epoch += batch_size
+        end = self_index_in_epoch
+        return self_images[start:end]
+
+
+def make_random(shape):
+    return np.random.random(size = shape).astype('float32')
+
+
+
+data_x = tf.placeholder(tf.float32, shape = (batch_size, size, size))
+data_y = tf.placeholder(tf.float32, shape = (batch_size, size, size))
+
+weight = [
+    tf.Variable(tf.random_normal([size, size],mean=0,stddev=1, dtype = tf.float32)),
+    tf.Variable(tf.random_normal([size, size],mean=0,stddev=1, dtype = tf.float32)),
+    tf.Variable(tf.random_normal([size, size],mean=0,stddev=1, dtype = tf.float32)),
+    tf.Variable(tf.random_normal([size, size],mean=0,stddev=1, dtype = tf.float32)),
+    tf.Variable(tf.random_normal([size, size], mean=0, stddev=1, dtype=tf.float32)),
+    tf.Variable(tf.random_normal([size, size], mean=0, stddev=1, dtype=tf.float32)),
+    tf.Variable(tf.random_normal([size, size],mean=0,stddev=1, dtype = tf.float32))
+]
+
+# forward propagation
+layer1 = tf.cast(tf.nn.softmax(tf.abs(sf_system(tf.cast(data_x, dtype = tf.complex64), weight[0]))),
+    dtype = tf.complex64)
+layer2 = tf.cast(tf.nn.softmax(tf.abs(sf_system(layer1, weight[1]))), dtype = tf.complex64)
+layer3 = tf.cast(tf.nn.softmax(tf.abs(sf_system(layer2, weight[2]))), dtype = tf.complex64)
+layer4 = tf.cast(tf.nn.softmax(tf.abs(sf_system(layer3, weight[3]))), dtype = tf.complex64)
+layer5 = tf.cast(tf.nn.softmax(tf.abs(sf_system(layer4, weight[4]))), dtype = tf.complex64)
+layer6 = tf.cast(tf.nn.softmax(tf.abs(sf_system(layer5, weight[5]))), dtype = tf.complex64)
+out = sf_system(layer6, weight[6])
+
+logits_ = tf.cast(tf.abs(out),dtype =tf.float32)
+loss = 0.5*tf.square(logits_-data_y)
+cost = tf.reduce_mean(loss)
+train_op = tf.train.AdamOptimizer(learning_rate = learning_rate).minimize(cost)
+
+
+init = tf.global_variables_initializer()
+train_epochs = 150
+train_loss_list = []
+saver = tf.train.Saver()
+session = tf.Session()
+
+session.run(init)
+total_batch = int(len(x_train) / batch_size)
+with tf.device('/cpu:0'):
+    for epoch in tqdm(range(train_epochs)):
+        for batch in tqdm(range(total_batch)):
+            batch_target= next_batch(batch_size)
+            # Add random noise to the input images
+
+            batch_noise = batch_target + noise_factor * np.random.randn(28,28)
+            batch_noise = np.clip(batch_noise, 0., 1.)
+            session.run(train_op, feed_dict = {data_x: change(batch_noise), data_y: change(batch_target)})
+
+        batch_cost= session.run(cost, feed_dict = {data_x: change(batch_noise), data_y: change(batch_target)})
+        train_loss_list.append(batch_cost)
+        print("epoch :{} loss:{:.4f} ".format(epoch + 1, batch_cost))
+
+
+        # msg_amp = np.array(session.run(amp))
+        # download_text(msg_amp, epoch, name = 'Amp')
+        # download_image(msg_amp, epoch, name = 'Amp')
+    saver.save(session, "model/fftdenoise_28_7layer_0.01_st1.ckpt")
+    print("Optimizer finished")
+fig, ax1 = plt.subplots()
+Ins = ax1.plot(np.arange(150), train_loss_list, label = 'Loss')
+ax1.set_xlabel('iteration')
+ax1.set_ylabel('training loss')
+
+labels = ['Loss']
+plt.legend(Ins, labels, loc = 7)
+plt.show()
