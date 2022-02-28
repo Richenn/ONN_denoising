@@ -1,0 +1,216 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Mon Aug  26 14:08:00 2021
+
+@author: Chen Xu
+"""
+
+import tensorflow.compat.v1 as tf
+tf.disable_v2_behavior()
+# import tensorflow as tf
+from tensorflow import keras
+import numpy as np
+from scipy.misc import imresize
+from tqdm import tqdm
+import matplotlib.pyplot as plt
+from sklearn.metrics import confusion_matrix
+#from tensorflow.examples.tutorials.mnist import input_data
+mnist=tf.keras.datasets.mnist
+(x_train,y_),(x_test,y_1)=mnist.load_data()
+x_train=x_train/255.0
+x_test=x_test/255.0
+y_=np.eye(10)[y_]
+y_1=np.eye(10)[y_1]
+# mnist = input_data.read_data_sets("MNIST_data",one_hot=True)
+# x_train = mnist.train.images
+# x_test = mnist.test.images
+
+
+size = 28
+delta = 0.03
+dL = 0.02
+batch_size = 128
+c = 3e8
+Hz = 0.4e12
+noise_factor = 0.5
+global_step = tf.Variable(0, trainable=False)
+LEARNING_RATE_STEP = 60000 // batch_size
+learning_rate = tf.train.exponential_decay(0.001, global_step,
+                                           LEARNING_RATE_STEP, 0.95, staircase=True)
+
+
+def _propogation(u0, d = delta, N = size, dL = dL, lmb = c / Hz, theta = 0.0):
+    # Parameter
+    df = 1.0 / dL
+    k = np.pi * 2.0 / lmb
+
+    # phase
+    def phase(i, j):
+        i -= N // 2
+        j -= N // 2
+        return ((i * df) * (i * df) + (j * df) * (j * df))
+
+    ph = np.fromfunction(phase, shape = (N, N), dtype = np.float32)
+    # H
+    H = np.exp(1.0j * k * d) * np.exp(-1.0j * lmb * np.pi * d * ph)
+    # Result
+    return tf.ifft2d(np.fft.fftshift(H) * tf.fft2d(u0) * dL * dL / (N * N)) * N * N * df * df
+
+def next_batch(batch_size, fake_data=False, shuffle=True):
+    self_images = x_train
+    self_labels = y_
+    self_epochs_completed =0
+    self_index_in_epoch = 0
+    self_num_examples=len(x_train)
+    start = self_index_in_epoch
+    if self_epochs_completed == 0 and start == 0 and shuffle:
+        perm0 = np.arange(self_num_examples)
+        np.random.shuffle(perm0)
+        self_images = x_train[perm0]
+        self_labels = y_[perm0]
+        # Go to the next epoch
+
+
+    if start + batch_size > self_num_examples:
+        self_epochs_completed += 1
+            # Get the rest examples in this epoch
+        rest_num_examples = self_num_examples - start
+        images_rest_part = self_images[start:self_num_examples]
+        labels_rest_part = self_labels[start:self_num_examples]
+        # Shuffle the data
+        if shuffle:
+            perm = np.arange(self_num_examples)
+            np.random.shuffle(perm)
+            self_images = x_train[perm]
+            self_labels = y_[perm]
+            # Start next epoch
+        start = 0
+        self_index_in_epoch = batch_size - rest_num_examples
+        end = self_index_in_epoch
+        images_new_part = self_images[start:end]
+        labels_new_part = self_labels[start:end]
+        return np.concatenate((images_rest_part, images_new_part), axis=0) , np.concatenate((labels_rest_part, labels_new_part), axis=0)
+    else:
+        self_index_in_epoch += batch_size
+        end = self_index_in_epoch
+        return self_images[start:end], self_labels[start:end]
+def propogation(u0, d, function = _propogation):
+    return tf.map_fn(function, u0)
+
+
+def make_random(shape):
+    return np.random.random(size = shape).astype('float32')
+
+
+def add_layer_amp(inputs, amp, phase, size, delta):
+    return propogation(inputs, delta) * tf.cast(amp, dtype = tf.complex64)
+
+
+def _change(input_):
+    return imresize(input_.reshape(28, 28), (size, size), interp = "nearest")
+
+
+def change(input_):
+    return np.array(list(map(_change, input_)))
+
+
+def download_text(msg, epoch, MIN = 1, MAX = 7, name = ''):
+    print("Download {}".format(name))
+    if name == 'Phase':
+        MIN = 0
+        MAX = 2
+    for i in range(MIN, MAX):
+        print("{} {}:".format(name, i))
+        np.savetxt("{}_Time_{}_layer_{}.txt".format(name, epoch + 1, i), msg[i - 1])
+        print("Done")
+
+
+def download_image(msg, epoch, MIN = 1, MAX = 7, name = ''):
+    print("Download images")
+    if name == 'Phase':
+        MIN = 0
+        MAX = 2
+    for i in range(MIN, MAX):
+        print("Image {}:".format(i))
+        plt.figure(dpi = 650.24)
+        plt.axis('off')
+        plt.grid('off')
+        plt.imshow(msg[i - 1])
+        plt.savefig("{}_Time_{}_layer_{}.pdf".format(name, epoch + 1, i))
+        print("Done")
+
+
+
+
+data_x = tf.placeholder(tf.float32, shape = (batch_size, size, size))
+data_y = tf.placeholder(tf.float32, shape = (batch_size, size, size))
+
+amp = [
+    tf.Variable(make_random(shape = (size, size)), dtype = tf.float32),
+    tf.Variable(make_random(shape = (size, size)), dtype = tf.float32),
+    tf.Variable(make_random(shape = (size, size)), dtype = tf.float32),
+    tf.Variable(make_random(shape = (size, size)), dtype = tf.float32),
+    tf.Variable(make_random(shape = (size, size)), dtype = tf.float32),
+    tf.Variable(make_random(shape = (size, size)), dtype = tf.float32),
+    tf.Variable(make_random(shape = (size, size)), dtype = tf.float32)
+]
+
+phase = [
+    tf.constant(np.random.random(size = (size, size)), dtype = tf.float32),
+    tf.constant(np.random.random(size = (size, size)), dtype = tf.float32)
+]
+
+
+layer_1 = add_layer_amp(tf.cast(data_x, dtype = tf.complex64), amp[0], phase[0], size, delta)
+layer_2 = add_layer_amp(layer_1, amp[1], phase[1], size, delta)
+layer_3 = add_layer_amp(layer_2, amp[2], phase[1], size, delta)
+layer_4 = add_layer_amp(layer_3, amp[3], phase[1], size, delta)
+layer_5 = add_layer_amp(layer_4, amp[4], phase[1], size, delta)
+layer_6 = add_layer_amp(layer_5, amp[5], phase[1], size, delta)
+output_layer = add_layer_amp(layer_6, amp[6], phase[1], size, delta)
+output = _propogation(output_layer)
+
+
+logits_ = tf.cast(tf.abs(output),dtype =tf.float32)
+loss = 0.5*tf.square(logits_-data_y)
+cost = tf.reduce_mean(loss)
+train_op = tf.train.AdamOptimizer(learning_rate = learning_rate).minimize(cost)
+
+
+init = tf.global_variables_initializer()
+train_epochs = 200
+train_loss_list = []
+saver=tf.train.Saver()
+#config = tf.compat.v1.ConfigProto(gpu_options=tf.compat.v1.GPUOptions(allow_growth=True))
+session = tf.Session()
+
+session.run(init)
+total_batch = int(55000 / batch_size)
+with tf.device('/gpu:0'):
+    for epoch in tqdm(range(train_epochs)):
+        for batch in tqdm(range(total_batch)):
+            batch_target, batch_y= next_batch(batch_size)
+            # Add random noise to the input images
+            batch_target=batch_target
+            batch_noise = batch_target + noise_factor * np.random.randn(28,28)
+            batch_noise = np.clip(batch_noise, 0., 1.)
+            session.run(train_op, feed_dict = {data_x: change(batch_noise), data_y: change(batch_target)})
+
+        batch_cost= session.run(cost, feed_dict = {data_x: change(batch_noise), data_y: change(batch_target)})
+        train_loss_list.append(batch_cost)
+        print("epoch :{} loss:{:.4f} ".format(epoch + 1, batch_cost))
+
+
+        # msg_amp = np.array(session.run(amp))
+        # download_text(msg_amp, epoch, name = 'Amp')
+        # download_image(msg_amp, epoch, name = 'Amp')
+    saver.save(session, "model/dnn_128_0.03_0.02_6layer-200.ckpt")
+    print("Optimizer finished")
+fig, ax1 = plt.subplots()
+Ins = ax1.plot(np.arange(200), train_loss_list, label = 'Loss')
+ax1.set_xlabel('iteration')
+ax1.set_ylabel('training loss')
+
+labels = ['Loss']
+plt.legend(Ins, labels, loc = 7)
+plt.show()
